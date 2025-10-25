@@ -3,6 +3,9 @@ import uuid
 from flask import Flask, request, redirect, url_for, render_template, send_from_directory, flash
 from PIL import Image
 from werkzeug.utils import secure_filename
+import io
+import base64
+import json
 
 # Attempt to import project grading modules
 import sys, os
@@ -66,47 +69,23 @@ def upload():
             flash('Layout data format unexpected. See server logs.')
             return redirect(url_for('index'))
 
-        # 4) Annotate image based on grading_result
+        # 4) Prepare errors and render the original uploaded (unannotated) image with web overlay
         errors = grading_result.get('errors', []) if grading_result else []
 
-        # Call the annotate function which writes a file named annotated_{name}.jpg in cwd
-        grade_proof.annotate_image(
-            image_array=boxed_image_array,
-            layout_map=layout_map,
-            errors_list=errors,
-            original_image_path=saved_path,
-        )
+        # Use the uploaded image file directly for display (no pre-drawn boxes)
+        display_rel_path = os.path.join('static', 'uploads', os.path.basename(saved_path)).replace('\\', '/')
 
-        # Expected annotated filename
-        base = os.path.basename(saved_path)
-        name, _ext = os.path.splitext(base)
-        generated_name = f"annotated_{name}.jpg"
-
-        # It may have been saved in the process cwd; move it into annotated folder
-        generated_src = os.path.join(os.getcwd(), generated_name)
-        generated_dst = os.path.join(app.config['ANNOTATED_FOLDER'], generated_name)
-
-        if os.path.exists(generated_src):
-            shutil.move(generated_src, generated_dst)
-        elif os.path.exists(os.path.join(BASE_DIR, generated_name)):
-            shutil.move(os.path.join(BASE_DIR, generated_name), generated_dst)
-        else:
-            # If the file wasn't found, still proceed but warn
-            flash('Annotated image was not created as expected. Check server logs.')
-
-        # Get image dimensions for overlay scaling in the template
+        # Get image dimensions for overlay scaling in the template (use uploaded image)
         img_width = img_height = None
         try:
-            with Image.open(generated_dst) as im:
+            with Image.open(saved_path) as im:
                 img_width, img_height = im.size
         except Exception:
-            # Fall back to defaults if image isn't available yet
             img_width, img_height = None, None
 
-        # Render result page showing the annotated image and JSON grading result
         return render_template(
             'result.html',
-            annotated_image=f'static/annotated/{generated_name}',
+            display_image=display_rel_path,
             grading=grading_result,
             layout_data_list=layout_data_list,
             errors=errors,
@@ -121,6 +100,78 @@ def upload():
 @app.route('/static/annotated/<path:filename>')
 def serve_annotated(filename):
     return send_from_directory(app.config['ANNOTATED_FOLDER'], filename)
+
+
+@app.route('/explain', methods=['POST'])
+def explain():
+    """Endpoint to ask Claude for an explanation about a specific comment/line.
+    Expects JSON: { image_path: 'static/uploads/xxx.jpg', box: [x,y,w,h], comment: 'text', question: '...' }
+    Returns JSON { answer: 'text' }
+    """
+    payload = request.get_json()
+    image_rel = payload.get('image_path')
+    box = payload.get('box')
+    comment_text = payload.get('comment', '')
+    question = payload.get('question', '')
+
+    if not image_rel or not box or not question:
+        return ({'error': 'Missing required fields (image_path, box, question)'}), 400
+
+    # Resolve file path
+    image_path = os.path.join(BASE_DIR, image_rel)
+    if not os.path.exists(image_path):
+        return ({'error': 'Image file not found'}), 404
+
+    # Load and crop the image region
+    try:
+        with Image.open(image_path) as im:
+            im = im.convert('RGB')
+            x, y, w, h = box
+            # add slight padding
+            pad = int(max(2, min(20, min(w, h) * 0.08)))
+            left = max(0, int(x - pad))
+            top = max(0, int(y - pad))
+            right = min(im.width, int(x + w + pad))
+            bottom = min(im.height, int(y + h + pad))
+            crop = im.crop((left, top, right, bottom))
+
+            bio = io.BytesIO()
+            crop.save(bio, format='JPEG')
+            b64 = base64.b64encode(bio.getvalue()).decode('utf-8')
+    except Exception as e:
+        return ({'error': f'Could not crop image: {e}'}), 500
+
+    # Build the message content for Claude
+    system_prompt = (
+        "You are an assistant that explains student's math proof steps concisely. "
+        "Provide a clear explanation targeted at an undergraduate-level student."
+    )
+
+    user_message_content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+        {"type": "text", "text": f"Student line context: {comment_text}\n\nQuestion: {question}\n\nBe concise and explain the issue or provide guidance."}
+    ]
+
+    try:
+        resp = grade_proof.client.messages.create(
+            model=grade_proof.MODEL_NAME,
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message_content}],
+        )
+        raw_text = resp.content[0].text
+        # strip code fences if present
+        if raw_text.startswith('```'):
+            # remove triple backticks block
+            try:
+                raw_text = raw_text.split('```', 2)[2].strip()
+            except Exception:
+                raw_text = raw_text.strip('`')
+
+        return ({'answer': raw_text}), 200
+    except Exception as e:
+        return ({'error': f'API error: {e}'}), 500
+
 
 
 if __name__ == '__main__':

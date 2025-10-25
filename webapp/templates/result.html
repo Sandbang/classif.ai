@@ -19,12 +19,12 @@
       <div style="display:flex; gap:1rem; align-items:flex-start;">
         <!-- Left: image + SVG overlay -->
         <div id="image-pane" style="position:relative; flex:1; max-width:70%;">
-          {% if annotated_image %}
-            <img id="annotated-img" src="/{{ annotated_image }}" alt="Annotated image" style="width:100%; height:auto; display:block;">
+          {% if display_image %}
+            <img id="annotated-img" src="/{{ display_image }}" alt="Uploaded image" style="width:100%; height:auto; display:block;">
             <!-- SVG overlay sized to the displayed image -->
             <svg id="overlay-svg" style="position:absolute; left:0; top:0; pointer-events:none;" width="0" height="0" xmlns="http://www.w3.org/2000/svg"></svg>
           {% else %}
-            <p>No annotated image available.</p>
+            <p>No image available.</p>
           {% endif %}
         </div>
 
@@ -37,6 +37,19 @@
                 <li class="comment-item" data-number="{{ err.number }}" style="margin-bottom:1rem; padding:0.5rem; border:1px solid #ddd; border-radius:6px; background:#fff;">
                   <strong>Line {{ err.number }}</strong>
                   <div style="margin-top:0.5rem; white-space:normal;">{{ err.error }}</div>
+                  <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center;">
+                    <button class="ask-btn" type="button" style="padding:0.25rem 0.5rem;">Ask</button>
+                    <span class="ask-status" style="font-size:0.9rem; color:#666;"></span>
+                  </div>
+
+                  <div class="ask-form" style="display:none; margin-top:0.5rem;">
+                    <textarea class="ask-input" rows="3" style="width:100%; box-sizing:border-box; padding:0.5rem;" placeholder="Ask a question about this comment..."></textarea>
+                    <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+                      <button class="ask-send" type="button" style="padding:0.35rem 0.6rem;">Send</button>
+                      <button class="ask-cancel" type="button" style="padding:0.35rem 0.6rem;">Cancel</button>
+                    </div>
+                    <div class="ask-answer" style="margin-top:0.5rem; background:#fafafa; padding:0.5rem; border-radius:4px; display:none;"></div>
+                  </div>
                 </li>
               {% endfor %}
             </ul>
@@ -166,6 +179,81 @@
             el.addEventListener('mouseleave', () => {
               el.classList.remove('hover');
               drawLines();
+            });
+          });
+
+          // Hook up Ask UI for each comment
+          document.querySelectorAll('.comment-item').forEach((el) => {
+            const askBtn = el.querySelector('.ask-btn');
+            const form = el.querySelector('.ask-form');
+            const send = el.querySelector('.ask-send');
+            const cancel = el.querySelector('.ask-cancel');
+            const input = el.querySelector('.ask-input');
+            const answerBox = el.querySelector('.ask-answer');
+            const status = el.querySelector('.ask-status');
+
+            if(!askBtn) return;
+
+            askBtn.addEventListener('click', () => {
+              // toggle
+              if(form.style.display === 'none'){
+                form.style.display = 'block';
+                input.focus();
+              } else {
+                form.style.display = 'none';
+              }
+            });
+
+            cancel.addEventListener('click', () => {
+              form.style.display = 'none';
+            });
+
+            send.addEventListener('click', async () => {
+              const q = input.value && input.value.trim();
+              if(!q){
+                status.textContent = 'Please enter a question.';
+                return;
+              }
+              status.textContent = 'Asking...';
+              answerBox.style.display = 'none';
+              answerBox.textContent = '';
+
+              const num = el.getAttribute('data-number');
+              const box = findBoxForNumber(num);
+              if(!box){
+                status.textContent = 'No box for this line.';
+                return;
+              }
+
+              // image path relative to app root (remove leading / if present)
+              const imgEl = document.getElementById('annotated-img');
+              let imgPath = imgEl ? imgEl.getAttribute('src') : null;
+              if(imgPath && imgPath.startsWith('/')) imgPath = imgPath.slice(1);
+
+              const payload = {
+                image_path: imgPath,
+                box: box,
+                comment: el.querySelector('div').textContent || '',
+                question: q,
+              };
+
+              try{
+                const resp = await fetch('/explain', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload),
+                });
+                const data = await resp.json();
+                if(resp.ok && data.answer){
+                  answerBox.textContent = data.answer;
+                  answerBox.style.display = 'block';
+                  status.textContent = '';
+                } else {
+                  status.textContent = data.error || ('Request failed: ' + resp.status);
+                }
+              } catch(err){
+                status.textContent = 'Network error';
+              }
             });
           });
         }
