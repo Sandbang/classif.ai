@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grading Result</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 2rem; }
+      .container { max-width: 900px; margin: auto; }
+      img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+      pre { background: #f7f7f7; padding: 1rem; border-radius: 6px; }
+      .comment-item.hover { border-color:#b00; box-shadow: 0 2px 6px rgba(176,0,0,0.08); }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Grading Result</h1>
+
+      <div style="display:flex; gap:1rem; align-items:flex-start;">
+        <!-- Left: image + SVG overlay -->
+        <div id="image-pane" style="position:relative; flex:1; max-width:70%;">
+          {% if annotated_image %}
+            <img id="annotated-img" src="/{{ annotated_image }}" alt="Annotated image" style="width:100%; height:auto; display:block;">
+            <!-- SVG overlay sized to the displayed image -->
+            <svg id="overlay-svg" style="position:absolute; left:0; top:0; pointer-events:none;" width="0" height="0" xmlns="http://www.w3.org/2000/svg"></svg>
+          {% else %}
+            <p>No annotated image available.</p>
+          {% endif %}
+        </div>
+
+        <!-- Right: sidebar with comments -->
+        <aside id="sidebar" style="width:320px; max-height:80vh; overflow:auto; border-left:1px solid #eee; padding-left:1rem;">
+          <h2 style="margin-top:0;">Comments</h2>
+          {% if errors and errors|length > 0 %}
+            <ul style="list-style:none; padding:0; margin:0;">
+              {% for err in errors %}
+                <li class="comment-item" data-number="{{ err.number }}" style="margin-bottom:1rem; padding:0.5rem; border:1px solid #ddd; border-radius:6px; background:#fff;">
+                  <strong>Line {{ err.number }}</strong>
+                  <div style="margin-top:0.5rem; white-space:normal;">{{ err.error }}</div>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>No comments from the grader.</p>
+          {% endif %}
+
+          <h3 style="margin-top:1rem;">AI Grading JSON</h3>
+          <pre style="white-space:pre-wrap;">{{ grading | tojson(indent=2) }}</pre>
+
+          <p style="margin-top:1rem;"><a href="/">Back to upload</a></p>
+        </aside>
+      </div>
+    </div>
+
+    <script>
+      // When the image loads, draw connector lines from each sidebar comment to its target box center
+      (function(){
+        const img = document.getElementById('annotated-img');
+        const svg = document.getElementById('overlay-svg');
+        const sidebar = document.getElementById('sidebar');
+
+        // layout data passed from Flask: a list of {number, box}
+        const layout = {{ layout_data_list | tojson | safe }} || [];
+
+        function findBoxForNumber(num){
+          for(const item of layout){
+            // numbers may be numeric or strings
+            if(String(item.number) === String(num)) return item.box; // [x,y,w,h]
+          }
+          return null;
+        }
+
+        function drawLines(){
+          if(!img || !svg) return;
+          // compute displayed image size and scale factor
+          const dispW = img.clientWidth;
+          const dispH = img.clientHeight;
+          const natW = img.naturalWidth || {{ img_width or 'null' }};
+          const natH = img.naturalHeight || {{ img_height or 'null' }};
+          const scaleX = natW ? dispW / natW : 1;
+          const scaleY = natH ? dispH / natH : 1;
+
+          // size and position of the image relative to page
+          const imgRect = img.getBoundingClientRect();
+
+          // set svg to overlay the image (anchor to image-pane top-left)
+          svg.setAttribute('width', dispW);
+          svg.setAttribute('height', dispH);
+          svg.style.width = dispW + 'px';
+          svg.style.height = dispH + 'px';
+          svg.style.left = '0px';
+          svg.style.top = '0px';
+          // clear previous connectors but keep defs (we may recreate defs later if needed)
+          // remove only previously drawn path elements
+          Array.from(svg.querySelectorAll('path.connector-path')).forEach(n => n.remove());
+
+          // for each comment in sidebar, draw a line
+          const items = document.querySelectorAll('.comment-item');
+          items.forEach((el, idx) => {
+            const num = el.getAttribute('data-number');
+            const box = findBoxForNumber(num);
+            if(!box) return;
+            const [x,y,w,h] = box;
+            // center of target box in image coordinate space, then scale
+            const targetX = (x + w/2) * scaleX;
+            const targetY = (y + h/2) * scaleY;
+
+            // compute start point (center of the sidebar item) relative to image container
+            const itemRect = el.getBoundingClientRect();
+            const startX = (itemRect.left - imgRect.left) + itemRect.width/2;
+            const startY = (itemRect.top - imgRect.top) + itemRect.height/2;
+
+            // clamp start coordinates to image overlay bounds
+            const sx = Math.max(0, Math.min(dispW, startX));
+            const sy = Math.max(0, Math.min(dispH, startY));
+
+            // create a nice curved path
+            const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+            const dx = targetX - sx;
+            const dy = targetY - sy;
+            const mx = sx + dx * 0.5;
+            const my = sy + dy * 0.5;
+            const d = `M ${sx} ${sy} Q ${mx} ${my} ${targetX} ${targetY}`;
+            path.setAttribute('d', d);
+            path.setAttribute('class', 'connector-path');
+            path.setAttribute('data-number', String(num));
+            // if the corresponding comment is hovered, make the path more prominent
+            const commentEl = document.querySelector('.comment-item[data-number="' + num + '"]');
+            const isHover = commentEl && commentEl.classList.contains('hover');
+            path.setAttribute('stroke', isHover ? '#b00' : '#d33');
+            path.setAttribute('stroke-width', isHover ? '3.5' : '2');
+            path.setAttribute('fill', 'none');
+            path.setAttribute('marker-end','url(#arrowhead)');
+            svg.appendChild(path);
+          });
+
+          // add arrowhead marker (only once)
+          if(!svg.querySelector('defs')){
+            const defs = document.createElementNS('http://www.w3.org/2000/svg','defs');
+            defs.innerHTML = `\n<marker id="arrowhead" markerWidth="12" markerHeight="8" refX="12" refY="4" orient="auto">\n  <polygon points="0 0, 12 4, 0 8" fill="#d33"/>\n</marker>`;
+            svg.prepend(defs);
+          }
+        }
+
+        if(img){
+          if(img.complete){
+            drawLines();
+          } else {
+            img.addEventListener('load', drawLines);
+          }
+          // redraw on resize to handle responsive scaling
+          window.addEventListener('resize', () => { setTimeout(drawLines, 120); });
+          // redraw when the sidebar scrolls so arrows stay attached to comments
+          if(sidebar){
+            sidebar.addEventListener('scroll', () => { setTimeout(drawLines, 40); });
+          }
+          // redraw on page scroll (layout shifts)
+          window.addEventListener('scroll', () => { setTimeout(drawLines, 40); });
+
+          // Highlight path on hover of a comment
+          document.querySelectorAll('.comment-item').forEach((el) => {
+            el.addEventListener('mouseenter', () => {
+              el.classList.add('hover');
+              drawLines();
+            });
+            el.addEventListener('mouseleave', () => {
+              el.classList.remove('hover');
+              drawLines();
+            });
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

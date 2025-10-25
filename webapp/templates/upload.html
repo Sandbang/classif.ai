@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Upload Proof Image</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 2rem; }
+      .container { max-width: 600px; margin: auto; }
+      .card { padding: 1rem; border: 1px solid #ddd; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Upload proof image</h1>
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <ul>
+            {% for msg in messages %}
+              <li>{{ msg }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endwith %}
+
+      <div class="card">
+        <form action="/upload" method="post" enctype="multipart/form-data">
+          <div>
+            <label for="file">Select image</label><br>
+            <input type="file" id="file" name="file" accept="image/*" required>
+          </div>
+          <div style="margin-top: 1rem;">
+            <button type="submit">Upload & Grade</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </body>
+</html>
